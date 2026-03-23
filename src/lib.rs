@@ -5,8 +5,8 @@ use std::io::{Read, Write};
 pub struct Wave {
     socket: u32,  // TODO: add socket support
     options: u32, // TODO: add options
-    tx: usize,
-    rx: usize,
+    tx: usize,    // Data sent
+    rx: usize,    // Data received
 }
 
 impl Wave {
@@ -19,14 +19,14 @@ impl Wave {
         Ok(vec![])
     }
 
-    fn package(sink: &mut impl Write, data: &[u8]) -> Result<usize> {
+    fn package(sink: &mut impl Write, data: &[u8]) -> Result<()> {
         let mut out: Vec<u8> = Self::WAVE.to_vec();
         let length: u32 = data.len().try_into()?;
         out.append(&mut length.to_be_bytes().to_vec());
         out.append(&mut data.to_vec());
 
         sink.write_all(&mut out)?;
-        Ok(out.len())
+        Ok(())
     }
 
     fn unpackage(source: &mut impl Read) -> Result<Vec<u8>> {
@@ -56,12 +56,11 @@ mod tests {
     fn package_success() {
         let mut sink: Vec<u8> = Vec::new();
         let data: Vec<u8> = vec![0x11, 0x22, 0x33, 0x44, 0x55];
-        let sink_len = Wave::package(&mut sink, &data).expect("Failed to package");
+        Wave::package(&mut sink, &data).expect("Failed to package");
 
         let expected: Vec<u8> = vec![
             0x77, 0x61, 0x76, 0x65, 0x00, 0x00, 0x00, 0x05, 0x11, 0x22, 0x33, 0x44, 0x55,
         ];
-        assert_eq!(sink_len, expected.len());
         assert_eq!(sink, expected);
     }
 
