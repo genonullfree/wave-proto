@@ -13,6 +13,7 @@ pub struct Wave {
 
 impl Wave {
     const WAVE: &[u8] = &[0x77, 0x61, 0x76, 0x65];
+    const MAX_MSG: usize = 32768; // 32 * 1024
 
     pub fn new() -> Result<Self> {
         let socket = UdpSocket::bind("0.0.0.0:9003")?;
@@ -55,6 +56,13 @@ impl Wave {
             // Package message
             let mut buf = Vec::new();
             let data_len = data.len();
+            if data_len > Self::MAX_MSG {
+                return Err(anyhow!(
+                    "Message is too long ( {data_len} > {} )",
+                    Self::MAX_MSG
+                ));
+            }
+
             Self::package(&mut buf, data)?;
             // Send packet
             self.socket.send_to(&buf, &remote)?;
@@ -70,7 +78,7 @@ impl Wave {
 
     pub fn receive(&mut self) -> Result<Vec<u8>> {
         // Receive packet
-        let mut buf = [0u8; 65535];
+        let mut buf = [0u8; Self::MAX_MSG + 8];
         let (_length, source) = self.socket.recv_from(&mut buf)?;
 
         // Verify source
