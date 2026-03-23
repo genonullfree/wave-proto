@@ -1,4 +1,5 @@
-use anyhow::Result;
+use anyhow::{Result, anyhow};
+use std::io::Read;
 
 #[derive(Debug)]
 pub struct Wave {
@@ -26,7 +27,23 @@ impl Wave {
         Ok(out)
     }
 
-    //fn unpackage(data: impl Read) -> Result<Vec<u8>> {
+    fn unpackage(data: &mut impl Read) -> Result<Vec<u8>> {
+        let mut check = [0u8; 4];
+        data.read_exact(&mut check)?;
+        println!("{check:?}");
+        if &check != Self::WAVE {
+            return Err(anyhow!("Protocol header mismatch!"));
+        }
+
+        data.read_exact(&mut check)?;
+        println!("{check:?}");
+        let length: u32 = u32::from_be_bytes(check);
+
+        let mut buf: Vec<u8> = vec![0; length.try_into()?];
+        data.read_exact(&mut buf[..])?;
+        println!("{buf:?}");
+        Ok(buf)
+    }
 }
 
 #[cfg(test)]
@@ -42,5 +59,17 @@ mod tests {
             0x77, 0x61, 0x76, 0x65, 0x00, 0x00, 0x00, 0x05, 0x11, 0x22, 0x33, 0x44, 0x55,
         ];
         assert_eq!(packaged, expected);
+    }
+
+    #[test]
+    fn unpackage_success() {
+        let data: Vec<u8> = vec![
+            0x77, 0x61, 0x76, 0x65, 0x00, 0x00, 0x00, 0x08, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66,
+            0x77, 0x88,
+        ];
+        let unpackaged = Wave::unpackage(&mut data.as_slice()).expect("Failed to unpackage");
+
+        let expected: Vec<u8> = vec![0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
+        assert_eq!(unpackaged, expected);
     }
 }
