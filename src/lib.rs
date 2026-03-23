@@ -1,5 +1,5 @@
 use anyhow::{Result, anyhow};
-use std::io::Read;
+use std::io::{Read, Write};
 
 #[derive(Debug)]
 pub struct Wave {
@@ -19,28 +19,30 @@ impl Wave {
         Ok(vec![])
     }
 
-    fn package(data: &[u8]) -> Result<Vec<u8>> {
+    fn package(sink: &mut impl Write, data: &[u8]) -> Result<usize> {
         let mut out: Vec<u8> = Self::WAVE.to_vec();
         let length: u32 = data.len().try_into()?;
         out.append(&mut length.to_be_bytes().to_vec());
         out.append(&mut data.to_vec());
-        Ok(out)
+
+        sink.write_all(&mut out)?;
+        Ok(out.len())
     }
 
-    fn unpackage(data: &mut impl Read) -> Result<Vec<u8>> {
+    fn unpackage(source: &mut impl Read) -> Result<Vec<u8>> {
         let mut check = [0u8; 4];
-        data.read_exact(&mut check)?;
+        source.read_exact(&mut check)?;
         println!("{check:?}");
         if &check != Self::WAVE {
             return Err(anyhow!("Protocol header mismatch!"));
         }
 
-        data.read_exact(&mut check)?;
+        source.read_exact(&mut check)?;
         println!("{check:?}");
         let length: u32 = u32::from_be_bytes(check);
 
         let mut buf: Vec<u8> = vec![0; length.try_into()?];
-        data.read_exact(&mut buf[..])?;
+        source.read_exact(&mut buf[..])?;
         println!("{buf:?}");
         Ok(buf)
     }
@@ -52,13 +54,15 @@ mod tests {
 
     #[test]
     fn package_success() {
+        let mut sink: Vec<u8> = Vec::new();
         let data: Vec<u8> = vec![0x11, 0x22, 0x33, 0x44, 0x55];
-        let packaged = Wave::package(&data).expect("Failed to package");
+        let sink_len = Wave::package(&mut sink, &data).expect("Failed to package");
 
         let expected: Vec<u8> = vec![
             0x77, 0x61, 0x76, 0x65, 0x00, 0x00, 0x00, 0x05, 0x11, 0x22, 0x33, 0x44, 0x55,
         ];
-        assert_eq!(packaged, expected);
+        assert_eq!(sink_len, expected.len());
+        assert_eq!(sink, expected);
     }
 
     #[test]
