@@ -1,12 +1,15 @@
+use aes_gcm::{
+    Aes256Gcm, Key,
+    aead::{Aead, AeadCore, KeyInit, OsRng},
+};
 use anyhow::{Result, anyhow};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, UdpSocket};
 
-#[derive(Debug)]
 pub struct Wave {
     socket: UdpSocket,
     remote: Option<SocketAddr>,
-    //options: u32, // TODO: add options? encryption?
+    crypto: Option<Crypto>,
     tx: usize, // Data sent
     rx: usize, // Data received
 }
@@ -15,29 +18,43 @@ impl Wave {
     const WAVE: &[u8] = &[0x77, 0x61, 0x76, 0x65];
     const MAX_MSG: usize = 32768; // 32 * 1024
 
-    pub fn new() -> Result<Self> {
+    pub fn new(key: Option<&[u8; 32]>) -> Result<Self> {
         let socket = UdpSocket::bind("0.0.0.0:9003")?;
         let remote = None;
+        let crypto = if let Some(k) = key {
+            let c = Crypto::init(k.into())?;
+            Some(c)
+        } else {
+            None
+        };
         let tx = 0;
         let rx = 0;
 
         Ok(Self {
             socket,
             remote,
+            crypto,
             tx,
             rx,
         })
     }
 
-    pub fn new_at(port: u16) -> Result<Self> {
+    pub fn new_at(port: u16, key: Option<&[u8; 32]>) -> Result<Self> {
         let socket = UdpSocket::bind(format!("0.0.0.0:{port}"))?;
         let remote = None;
+        let crypto = if let Some(k) = key {
+            let c = Crypto::init(k.into())?;
+            Some(c)
+        } else {
+            None
+        };
         let tx = 0;
         let rx = 0;
 
         Ok(Self {
             socket,
             remote,
+            crypto,
             tx,
             rx,
         })
@@ -63,9 +80,25 @@ impl Wave {
                 ));
             }
 
+            // Package up message
             Self::package(&mut buf, data)?;
+
+            // Encrypt if crypto is in use
+            let message = if let Some(crypto) = &self.crypto {
+                let nonce = Crypto::nonce();
+                let mut ciphertext = crypto
+                    .cipher
+                    .encrypt((&nonce).into(), &*buf)
+                    .expect("Crypto error encrypting");
+                let mut message = nonce.to_vec();
+                message.append(&mut ciphertext);
+                message
+            } else {
+                buf
+            };
+
             // Send packet
-            self.socket.send_to(&buf, &remote)?;
+            self.socket.send_to(&message, &remote)?;
 
             // Update counter
             self.tx += data_len;
@@ -79,7 +112,7 @@ impl Wave {
     pub fn receive(&mut self) -> Result<Vec<u8>> {
         // Receive packet
         let mut buf = [0u8; Self::MAX_MSG + 8];
-        let (_length, source) = self.socket.recv_from(&mut buf)?;
+        let (length, source) = self.socket.recv_from(&mut buf)?;
 
         // Verify source
         if let Some(remote) = self.remote {
@@ -90,8 +123,18 @@ impl Wave {
             self.remote = Some(source);
         }
 
+        // Decrypt if crypto is in use
+        let plaintext = if let Some(crypto) = &self.crypto {
+            crypto
+                .cipher
+                .decrypt((&buf[..12]).into(), &buf[12..length])
+                .expect("Crypto error decrypting")
+        } else {
+            (&buf[..length]).to_vec()
+        };
+
         // Unpackage message
-        let message = Self::unpackage(&mut buf.as_slice())?;
+        let message = Self::unpackage(&mut plaintext.as_slice())?;
 
         // Update counter
         self.rx += message.len();
@@ -122,6 +165,21 @@ impl Wave {
         let mut buf: Vec<u8> = vec![0; length.try_into()?];
         source.read_exact(&mut buf[..])?;
         Ok(buf)
+    }
+}
+
+struct Crypto {
+    cipher: Aes256Gcm,
+}
+
+impl Crypto {
+    pub fn init(key: &Key<Aes256Gcm>) -> Result<Self> {
+        let cipher = Aes256Gcm::new(&key);
+        Ok(Self { cipher })
+    }
+
+    pub fn nonce() -> [u8; 12] {
+        Aes256Gcm::generate_nonce(&mut OsRng).into()
     }
 }
 
