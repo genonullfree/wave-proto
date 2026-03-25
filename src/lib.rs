@@ -171,9 +171,9 @@ impl Wave {
             remote.crypto = Some(crypto);
             remote.status = Status::Encrypted;
             self.update_remote(&remote);
+        } else {
+            self.update_remote(&remote);
         }
-
-        self.update_remote(&remote);
         Ok((source, message))
     }
 
