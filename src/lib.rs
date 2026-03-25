@@ -78,14 +78,12 @@ impl Wave {
         self.send(public.as_bytes())?;
         let remote_public = self.receive()?;
         let ss = Crypto::gen_shared_secret(&remote_public, &secret)?;
-        println!("SharedSecret (connect): {:?}", ss.raw_secret_bytes());
         let crypto = Crypto::init(ss.raw_secret_bytes())?;
         self.crypto = Some(crypto);
 
         // Set generated AES256 key
         let key = Aes256Gcm::generate_key(OsRng);
         self.send(key.as_slice())?;
-        println!("Key: {:?}", &key.as_slice());
         let crypto = Crypto::init(&key)?;
         self.crypto = Some(crypto);
         self.status = Status::Encrypted;
@@ -142,8 +140,11 @@ impl Wave {
 
         // Verify source
         if let Some(remote) = self.remote {
+            // If we have not seen this source before, remove our crypto and set this as the new
+            // source
             if remote != source {
-                return Err(anyhow!("Received packet from non-remote source"));
+                self.crypto = None;
+                self.remote = Some(source);
             }
         } else {
             self.remote = Some(source);
@@ -167,14 +168,12 @@ impl Wave {
             let private = Crypto::gen_secret();
             let public = Crypto::gen_pk_bytes(&private);
             let ss = Crypto::gen_shared_secret(&message, &private)?;
-            println!("SharedSecret (recv): {:?}", ss.raw_secret_bytes());
             self.send(public.as_bytes())?;
             let crypto = Crypto::init(ss.raw_secret_bytes())?;
             self.crypto = Some(crypto);
 
             // Receive generated AES256 key
             let k = self.receive()?;
-            println!("Key: {k:?}");
             let crypto = Crypto::init(Key::<Aes256Gcm>::from_slice(&k))?;
             self.crypto = Some(crypto);
             self.status = Status::Encrypted;
@@ -235,7 +234,6 @@ impl Crypto {
     }
 
     pub fn gen_shared_secret(input: &[u8], secret: &EphemeralSecret) -> Result<SharedSecret> {
-        //pub fn gen_shared_secret(input: &[u8], secret: &EphemeralSecret) -> Result<SharedSecret<Secp256k1>> {
         let remote_public = PublicKey::from_sec1_bytes(input)?;
         Ok(secret.diffie_hellman(&remote_public))
     }
