@@ -3,6 +3,10 @@ use aes_gcm::{
     aead::{Aead, AeadCore, KeyInit, OsRng},
 };
 use anyhow::{Result, anyhow};
+use k256::{
+    EncodedPoint, PublicKey,
+    ecdh::{EphemeralSecret, SharedSecret},
+};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, UdpSocket};
 
@@ -10,23 +14,27 @@ pub struct Wave {
     socket: UdpSocket,
     remote: Option<SocketAddr>,
     crypto: Option<Crypto>,
+    status: Status,
     tx: usize, // Data sent
     rx: usize, // Data received
+}
+
+#[derive(Debug, PartialEq)]
+enum Status {
+    Start,
+    Ecdh,
+    Encrypted,
 }
 
 impl Wave {
     const WAVE: &[u8] = &[0x77, 0x61, 0x76, 0x65];
     const MAX_MSG: usize = 32768; // 32 * 1024
 
-    pub fn new(key: Option<&[u8; 32]>) -> Result<Self> {
+    pub fn new() -> Result<Self> {
         let socket = UdpSocket::bind("0.0.0.0:9003")?;
         let remote = None;
-        let crypto = if let Some(k) = key {
-            let c = Crypto::init(k.into())?;
-            Some(c)
-        } else {
-            None
-        };
+        let crypto = None;
+        let status = Status::Start;
         let tx = 0;
         let rx = 0;
 
@@ -34,20 +42,17 @@ impl Wave {
             socket,
             remote,
             crypto,
+            status,
             tx,
             rx,
         })
     }
 
-    pub fn new_at(port: u16, key: Option<&[u8; 32]>) -> Result<Self> {
+    pub fn new_at(port: u16) -> Result<Self> {
         let socket = UdpSocket::bind(format!("0.0.0.0:{port}"))?;
         let remote = None;
-        let crypto = if let Some(k) = key {
-            let c = Crypto::init(k.into())?;
-            Some(c)
-        } else {
-            None
-        };
+        let crypto = None;
+        let status = Status::Start;
         let tx = 0;
         let rx = 0;
 
@@ -55,6 +60,7 @@ impl Wave {
             socket,
             remote,
             crypto,
+            status,
             tx,
             rx,
         })
@@ -64,6 +70,26 @@ impl Wave {
         let remote: SocketAddr = remote.parse()?;
         self.socket.connect(remote)?;
         self.remote = Some(remote);
+
+        self.status = Status::Ecdh;
+        let secret = Crypto::gen_secret();
+        let public = Crypto::gen_pk_bytes(&secret);
+
+        self.send(public.as_bytes())?;
+        let remote_public = self.receive()?;
+        let ss = Crypto::gen_shared_secret(&remote_public, &secret)?;
+        println!("SharedSecret (connect): {:?}", ss.raw_secret_bytes());
+        let crypto = Crypto::init(ss.raw_secret_bytes())?;
+        self.crypto = Some(crypto);
+
+        // Set generated AES256 key
+        let key = Aes256Gcm::generate_key(OsRng);
+        self.send(key.as_slice())?;
+        println!("Key: {:?}", &key.as_slice());
+        let crypto = Crypto::init(&key)?;
+        self.crypto = Some(crypto);
+        self.status = Status::Encrypted;
+
         Ok(())
     }
 
@@ -98,7 +124,7 @@ impl Wave {
             };
 
             // Send packet
-            self.socket.send_to(&message, &remote)?;
+            self.socket.send_to(&message, remote)?;
 
             // Update counter
             self.tx += data_len;
@@ -130,11 +156,29 @@ impl Wave {
                 .decrypt((&buf[..12]).into(), &buf[12..length])
                 .expect("Crypto error decrypting")
         } else {
-            (&buf[..length]).to_vec()
+            (buf[..length]).to_vec()
         };
 
         // Unpackage message
         let message = Self::unpackage(&mut plaintext.as_slice())?;
+
+        // If crypto is not yet in use, setup with ECDH
+        if self.crypto.is_none() && self.status != Status::Ecdh {
+            let private = Crypto::gen_secret();
+            let public = Crypto::gen_pk_bytes(&private);
+            let ss = Crypto::gen_shared_secret(&message, &private)?;
+            println!("SharedSecret (recv): {:?}", ss.raw_secret_bytes());
+            self.send(public.as_bytes())?;
+            let crypto = Crypto::init(ss.raw_secret_bytes())?;
+            self.crypto = Some(crypto);
+
+            // Receive generated AES256 key
+            let k = self.receive()?;
+            println!("Key: {k:?}");
+            let crypto = Crypto::init(Key::<Aes256Gcm>::from_slice(&k))?;
+            self.crypto = Some(crypto);
+            self.status = Status::Encrypted;
+        }
 
         // Update counter
         self.rx += message.len();
@@ -148,14 +192,14 @@ impl Wave {
         out.append(&mut length.to_be_bytes().to_vec());
         out.append(&mut data.to_vec());
 
-        sink.write_all(&mut out)?;
+        sink.write_all(&out)?;
         Ok(())
     }
 
     fn unpackage(source: &mut impl Read) -> Result<Vec<u8>> {
         let mut check = [0u8; 4];
         source.read_exact(&mut check)?;
-        if &check != Self::WAVE {
+        if check != Self::WAVE {
             return Err(anyhow!("Protocol header mismatch!"));
         }
 
@@ -174,12 +218,26 @@ struct Crypto {
 
 impl Crypto {
     pub fn init(key: &Key<Aes256Gcm>) -> Result<Self> {
-        let cipher = Aes256Gcm::new(&key);
+        let cipher = Aes256Gcm::new(key);
         Ok(Self { cipher })
     }
 
     pub fn nonce() -> [u8; 12] {
         Aes256Gcm::generate_nonce(&mut OsRng).into()
+    }
+
+    pub fn gen_secret() -> EphemeralSecret {
+        EphemeralSecret::random(&mut OsRng)
+    }
+
+    pub fn gen_pk_bytes(secret: &EphemeralSecret) -> EncodedPoint {
+        EncodedPoint::from(secret.public_key())
+    }
+
+    pub fn gen_shared_secret(input: &[u8], secret: &EphemeralSecret) -> Result<SharedSecret> {
+        //pub fn gen_shared_secret(input: &[u8], secret: &EphemeralSecret) -> Result<SharedSecret<Secp256k1>> {
+        let remote_public = PublicKey::from_sec1_bytes(input)?;
+        Ok(secret.diffie_hellman(&remote_public))
     }
 }
 
