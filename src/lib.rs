@@ -12,14 +12,17 @@ use std::net::{SocketAddr, UdpSocket};
 
 pub struct Wave {
     socket: UdpSocket,
-    remote: Option<SocketAddr>,
-    crypto: Option<Crypto>,
-    status: Status,
-    tx: usize, // Data sent
-    rx: usize, // Data received
+    remote: Vec<Remote>,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone)]
+struct Remote {
+    addr: SocketAddr,
+    crypto: Option<Crypto>,
+    status: Status,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 enum Status {
     Start,
     Ecdh,
@@ -32,126 +35,115 @@ impl Wave {
 
     pub fn new() -> Result<Self> {
         let socket = UdpSocket::bind("0.0.0.0:9003")?;
-        let remote = None;
-        let crypto = None;
-        let status = Status::Start;
-        let tx = 0;
-        let rx = 0;
+        let remote = Vec::new();
 
-        Ok(Self {
-            socket,
-            remote,
-            crypto,
-            status,
-            tx,
-            rx,
-        })
+        Ok(Self { socket, remote })
     }
 
     pub fn new_at(port: u16) -> Result<Self> {
         let socket = UdpSocket::bind(format!("0.0.0.0:{port}"))?;
-        let remote = None;
-        let crypto = None;
-        let status = Status::Start;
-        let tx = 0;
-        let rx = 0;
+        let remote = Vec::new();
 
-        Ok(Self {
-            socket,
-            remote,
-            crypto,
-            status,
-            tx,
-            rx,
-        })
+        Ok(Self { socket, remote })
     }
 
-    pub fn connect(&mut self, remote: &str) -> Result<()> {
-        let remote: SocketAddr = remote.parse()?;
-        self.socket.connect(remote)?;
-        self.remote = Some(remote);
-
-        self.status = Status::Ecdh;
-        let secret = Crypto::gen_secret();
-        let public = Crypto::gen_pk_bytes(&secret);
-
-        self.send(public.as_bytes())?;
-        let remote_public = self.receive()?;
-        let ss = Crypto::gen_shared_secret(&remote_public, &secret)?;
-        let crypto = Crypto::init(ss.raw_secret_bytes())?;
-        self.crypto = Some(crypto);
-
-        // Set generated AES256 key
-        let key = Aes256Gcm::generate_key(OsRng);
-        self.send(key.as_slice())?;
-        let crypto = Crypto::init(&key)?;
-        self.crypto = Some(crypto);
-        self.status = Status::Encrypted;
-
-        Ok(())
-    }
-
-    pub fn send(&mut self, data: &[u8]) -> Result<usize> {
-        // Verify we have a remote
-        if let Some(remote) = self.remote {
-            // Package message
-            let mut buf = Vec::new();
-            let data_len = data.len();
-            if data_len > Self::MAX_MSG {
-                return Err(anyhow!(
-                    "Message is too long ( {data_len} > {} )",
-                    Self::MAX_MSG
-                ));
-            }
-
-            // Package up message
-            Self::package(&mut buf, data)?;
-
-            // Encrypt if crypto is in use
-            let message = if let Some(crypto) = &self.crypto {
-                let nonce = Crypto::nonce();
-                let mut ciphertext = crypto
-                    .cipher
-                    .encrypt((&nonce).into(), &*buf)
-                    .expect("Crypto error encrypting");
-                let mut message = nonce.to_vec();
-                message.append(&mut ciphertext);
-                message
-            } else {
-                buf
-            };
-
-            // Send packet
-            self.socket.send_to(&message, remote)?;
-
-            // Update counter
-            self.tx += data_len;
-
-            Ok(0)
-        } else {
-            Err(anyhow!("Remote address is not set!"))
+    pub fn debug_print_remotes(&self) {
+        for r in &self.remote {
+            println!("Connected Addr: {:?} Status: {:?}", r.addr, r.status);
         }
     }
 
-    pub fn receive(&mut self) -> Result<Vec<u8>> {
+    pub fn connect(&mut self, remote: &str) -> Result<SocketAddr> {
+        let addr: SocketAddr = remote.parse()?;
+        self.socket.connect(addr)?;
+
+        let mut remote = Remote {
+            addr,
+            crypto: None,
+            status: Status::Ecdh,
+        };
+        self.update_remote(&remote);
+        let secret = Crypto::gen_secret();
+        let public = Crypto::gen_pk_bytes(&secret);
+
+        self.send(&remote.addr, public.as_bytes())?;
+        let (_source, remote_public) = self.receive()?;
+        let ss = Crypto::gen_shared_secret(&remote_public, &secret)?;
+        let crypto = Crypto::init(ss.raw_secret_bytes())?;
+        remote.crypto = Some(crypto);
+        self.update_remote(&remote);
+
+        // Set generated AES256 key
+        let key = Aes256Gcm::generate_key(OsRng);
+        self.send(&remote.addr, key.as_slice())?;
+        let crypto = Crypto::init(&key)?;
+        remote.crypto = Some(crypto);
+        remote.status = Status::Encrypted;
+        self.update_remote(&remote);
+
+        Ok(addr)
+    }
+
+    fn update_remote(&mut self, remote: &Remote) {
+        let _ = self.remote.pop_if(|x| x.addr == remote.addr);
+        self.remote.push(remote.clone());
+    }
+
+    fn lookup_remote(&mut self, addr: &SocketAddr) -> Result<Remote> {
+        if let Some(remote) = self.remote.pop_if(|x| x.addr == *addr) {
+            Ok(remote)
+        } else {
+            Ok(Remote {
+                addr: *addr,
+                crypto: None,
+                status: Status::Start,
+            })
+        }
+    }
+
+    pub fn send(&mut self, addr: &SocketAddr, data: &[u8]) -> Result<usize> {
+        let remote = self.lookup_remote(addr)?;
+        // Package message
+        let mut buf = Vec::new();
+        let data_len = data.len();
+        if data_len > Self::MAX_MSG {
+            return Err(anyhow!(
+                "Message is too long ( {data_len} > {} )",
+                Self::MAX_MSG
+            ));
+        }
+
+        // Package up message
+        Self::package(&mut buf, data)?;
+
+        // Encrypt if crypto is in use
+        let message = if let Some(crypto) = &remote.crypto {
+            let nonce = Crypto::nonce();
+            let mut ciphertext = crypto
+                .cipher
+                .encrypt((&nonce).into(), &*buf)
+                .expect("Crypto error encrypting");
+            let mut message = nonce.to_vec();
+            message.append(&mut ciphertext);
+            message
+        } else {
+            buf
+        };
+
+        // Send packet
+        self.socket.send_to(&message, remote.addr)?;
+        self.update_remote(&remote);
+        Ok(0)
+    }
+
+    pub fn receive(&mut self) -> Result<(SocketAddr, Vec<u8>)> {
         // Receive packet
         let mut buf = [0u8; Self::MAX_MSG + 8];
         let (length, source) = self.socket.recv_from(&mut buf)?;
 
-        // Verify source
-        if let Some(remote) = self.remote {
-            // If we have not seen this source before, remove our crypto and set this as the new
-            // source
-            if remote != source {
-                self.crypto = None;
-                self.remote = Some(source);
-            }
-        } else {
-            self.remote = Some(source);
-        }
-
+        let mut remote = self.lookup_remote(&source)?;
         // Decrypt if crypto is in use
-        let plaintext = if let Some(crypto) = &self.crypto {
+        let plaintext = if let Some(crypto) = &remote.crypto {
             crypto
                 .cipher
                 .decrypt((&buf[..12]).into(), &buf[12..length])
@@ -164,25 +156,25 @@ impl Wave {
         let message = Self::unpackage(&mut plaintext.as_slice())?;
 
         // If crypto is not yet in use, setup with ECDH
-        if self.crypto.is_none() && self.status != Status::Ecdh {
+        if remote.crypto.is_none() && remote.status != Status::Ecdh {
             let private = Crypto::gen_secret();
             let public = Crypto::gen_pk_bytes(&private);
             let ss = Crypto::gen_shared_secret(&message, &private)?;
-            self.send(public.as_bytes())?;
+            self.send(&remote.addr, public.as_bytes())?;
             let crypto = Crypto::init(ss.raw_secret_bytes())?;
-            self.crypto = Some(crypto);
+            remote.crypto = Some(crypto);
+            self.update_remote(&remote);
 
             // Receive generated AES256 key
-            let k = self.receive()?;
+            let (_source, k) = self.receive()?;
             let crypto = Crypto::init(Key::<Aes256Gcm>::from_slice(&k))?;
-            self.crypto = Some(crypto);
-            self.status = Status::Encrypted;
+            remote.crypto = Some(crypto);
+            remote.status = Status::Encrypted;
+            self.update_remote(&remote);
         }
 
-        // Update counter
-        self.rx += message.len();
-
-        Ok(message)
+        self.update_remote(&remote);
+        Ok((source, message))
     }
 
     fn package(sink: &mut impl Write, data: &[u8]) -> Result<()> {
@@ -211,6 +203,7 @@ impl Wave {
     }
 }
 
+#[derive(Clone)]
 struct Crypto {
     cipher: Aes256Gcm,
 }
