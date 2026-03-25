@@ -11,7 +11,7 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, UdpSocket};
 
 pub struct Wave {
-    socket: UdpSocket,
+    pub socket: UdpSocket,
     remote: Vec<Remote>,
 }
 
@@ -57,11 +57,9 @@ impl Wave {
         let addr: SocketAddr = remote.parse()?;
         self.socket.connect(addr)?;
 
-        let mut remote = Remote {
-            addr,
-            crypto: None,
-            status: Status::Ecdh,
-        };
+        let mut remote = self.lookup_remote(&addr)?;
+        remote.crypto = None;
+        remote.status = Status::Ecdh;
         self.update_remote(&remote);
         let secret = Crypto::gen_secret();
         let public = Crypto::gen_pk_bytes(&secret);
@@ -85,12 +83,16 @@ impl Wave {
     }
 
     fn update_remote(&mut self, remote: &Remote) {
-        let _ = self.remote.pop_if(|x| x.addr == remote.addr);
+        let index = self.remote.iter().position(|x| x.addr == remote.addr);
+        if let Some(index) = index {
+            self.remote.remove(index);
+        }
         self.remote.push(remote.clone());
     }
 
     fn lookup_remote(&mut self, addr: &SocketAddr) -> Result<Remote> {
-        if let Some(remote) = self.remote.pop_if(|x| x.addr == *addr) {
+        if let Some(remote) = self.remote.iter().position(|x| x.addr == *addr) {
+            let remote = self.remote.remove(remote);
             Ok(remote)
         } else {
             Ok(Remote {
