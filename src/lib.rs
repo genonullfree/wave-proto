@@ -3,17 +3,22 @@ use aes_gcm::{
     aead::{Aead, AeadCore, KeyInit, OsRng},
 };
 use anyhow::{Result, anyhow};
+use async_net::UdpSocket;
 use k256::{
     EncodedPoint, PublicKey,
     ecdh::{EphemeralSecret, SharedSecret},
 };
 use std::io::{Read, Write};
-use std::net::{SocketAddr, UdpSocket};
+use std::net::SocketAddr;
 
+#[derive(Clone)]
 pub struct Wave {
     pub socket: UdpSocket,
     remote: Vec<Remote>,
 }
+
+unsafe impl Send for Wave {}
+unsafe impl Sync for Wave {}
 
 #[derive(Clone)]
 struct Remote {
@@ -33,15 +38,15 @@ impl Wave {
     const WAVE: &[u8] = &[0x77, 0x61, 0x76, 0x65];
     const MAX_MSG: usize = 32768; // 32 * 1024
 
-    pub fn new() -> Result<Self> {
-        let socket = UdpSocket::bind("0.0.0.0:9003")?;
+    pub async fn new() -> Result<Self> {
+        let socket = UdpSocket::bind("0.0.0.0:9003").await?;
         let remote = Vec::new();
 
         Ok(Self { socket, remote })
     }
 
-    pub fn new_at(port: u16) -> Result<Self> {
-        let socket = UdpSocket::bind(format!("0.0.0.0:{port}"))?;
+    pub async fn new_at(port: u16) -> Result<Self> {
+        let socket = UdpSocket::bind(format!("0.0.0.0:{port}")).await?;
         let remote = Vec::new();
 
         Ok(Self { socket, remote })
@@ -53,9 +58,9 @@ impl Wave {
         }
     }
 
-    pub fn connect(&mut self, remote: &str) -> Result<SocketAddr> {
+    pub async fn connect(&mut self, remote: &str) -> Result<SocketAddr> {
         let addr: SocketAddr = remote.parse()?;
-        self.socket.connect(addr)?;
+        self.socket.connect(addr).await?;
 
         let mut remote = self.lookup_remote(&addr)?;
         remote.crypto = None;
@@ -64,8 +69,8 @@ impl Wave {
         let secret = Crypto::gen_secret();
         let public = Crypto::gen_pk_bytes(&secret);
 
-        self.send(&remote.addr, public.as_bytes())?;
-        let (_source, remote_public) = self.receive()?;
+        self.send(&remote.addr, public.as_bytes()).await?;
+        let (_source, remote_public) = self.receive().await?;
         let ss = Crypto::gen_shared_secret(&remote_public, &secret)?;
         let crypto = Crypto::init(ss.raw_secret_bytes())?;
         remote.crypto = Some(crypto);
@@ -73,7 +78,7 @@ impl Wave {
 
         // Set generated AES256 key
         let key = Aes256Gcm::generate_key(OsRng);
-        self.send(&remote.addr, key.as_slice())?;
+        self.send(&remote.addr, key.as_slice()).await?;
         let crypto = Crypto::init(&key)?;
         remote.crypto = Some(crypto);
         remote.status = Status::Encrypted;
@@ -103,7 +108,7 @@ impl Wave {
         }
     }
 
-    pub fn send(&mut self, addr: &SocketAddr, data: &[u8]) -> Result<usize> {
+    pub async fn send(&mut self, addr: &SocketAddr, data: &[u8]) -> Result<usize> {
         let remote = self.lookup_remote(addr)?;
         // Package message
         let mut buf = Vec::new();
@@ -133,15 +138,15 @@ impl Wave {
         };
 
         // Send packet
-        self.socket.send_to(&message, remote.addr)?;
+        self.socket.send_to(&message, remote.addr).await?;
         self.update_remote(&remote);
         Ok(0)
     }
 
-    pub fn receive(&mut self) -> Result<(SocketAddr, Vec<u8>)> {
+    pub async fn receive(&mut self) -> Result<(SocketAddr, Vec<u8>)> {
         // Receive packet
         let mut buf = [0u8; Self::MAX_MSG + 8];
-        let (length, source) = self.socket.recv_from(&mut buf)?;
+        let (length, source) = self.socket.recv_from(&mut buf).await?;
 
         let mut remote = self.lookup_remote(&source)?;
         // Decrypt if crypto is in use
@@ -162,13 +167,13 @@ impl Wave {
             let private = Crypto::gen_secret();
             let public = Crypto::gen_pk_bytes(&private);
             let ss = Crypto::gen_shared_secret(&message, &private)?;
-            self.send(&remote.addr, public.as_bytes())?;
+            self.send(&remote.addr, public.as_bytes()).await?;
             let crypto = Crypto::init(ss.raw_secret_bytes())?;
             remote.crypto = Some(crypto);
             self.update_remote(&remote);
 
             // Receive generated AES256 key
-            let (_source, k) = self.receive()?;
+            let (_source, k) = Box::pin(self.receive()).await?;
             let crypto = Crypto::init(Key::<Aes256Gcm>::from_slice(&k))?;
             remote.crypto = Some(crypto);
             remote.status = Status::Encrypted;

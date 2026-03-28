@@ -6,5 +6,7 @@ edition = "2024"
 [dependencies]
 aes-gcm = "0.10.3"
 anyhow = "1.0.102"
+async-net = "2.0.0"
+async-std = "1.13.2"
 k256 = { version = "0.13.4", features = ["ecdh"] }
 rand = "0.10.0"
