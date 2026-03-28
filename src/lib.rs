@@ -151,10 +151,15 @@ impl Wave {
         let mut remote = self.lookup_remote(&source)?;
         // Decrypt if crypto is in use
         let plaintext = if let Some(crypto) = &remote.crypto {
-            crypto
-                .cipher
-                .decrypt((&buf[..12]).into(), &buf[12..length])
-                .expect("Crypto error decrypting")
+            match crypto.cipher.decrypt((&buf[..12]).into(), &buf[12..length]) {
+                Ok(p) => p,
+                Err(_e) => {
+                    println!("Error decrypting. Attempting to reconfigure crypto.");
+                    remote.crypto = None;
+                    remote.status = Status::Start;
+                    (buf[..length]).to_vec()
+                }
+            }
         } else {
             (buf[..length]).to_vec()
         };
@@ -178,10 +183,12 @@ impl Wave {
             remote.crypto = Some(crypto);
             remote.status = Status::Encrypted;
             self.update_remote(&remote);
+            let (_, message) = Box::pin(self.receive()).await?;
+            Ok((source, message))
         } else {
             self.update_remote(&remote);
+            Ok((source, message))
         }
-        Ok((source, message))
     }
 
     fn package(sink: &mut impl Write, data: &[u8]) -> Result<()> {
