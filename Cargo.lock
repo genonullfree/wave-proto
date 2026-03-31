@@ -1149,7 +1149,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "wave"
+name = "wave-proto"
 version = "0.1.0"
 dependencies = [
  "aes-gcm",
