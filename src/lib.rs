@@ -36,13 +36,20 @@ impl Wave {
     const MAX_MSG: usize = 32768; // 32 * 1024
 
     pub async fn new() -> Result<Self> {
+        let socket = UdpSocket::bind("0.0.0.0:0").await?;
+        let remote = Vec::new();
+
+        Ok(Self { socket, remote })
+    }
+
+    pub async fn listen() -> Result<Self> {
         let socket = UdpSocket::bind("0.0.0.0:9003").await?;
         let remote = Vec::new();
 
         Ok(Self { socket, remote })
     }
 
-    pub async fn new_at(port: u16) -> Result<Self> {
+    pub async fn listen_at(port: u16) -> Result<Self> {
         let socket = UdpSocket::bind(format!("0.0.0.0:{port}")).await?;
         let remote = Vec::new();
 
