@@ -17,9 +17,6 @@ pub struct Wave {
     remote: Vec<Remote>,
 }
 
-unsafe impl Send for Wave {}
-unsafe impl Sync for Wave {}
-
 #[derive(Clone)]
 struct Remote {
     addr: SocketAddr,
@@ -140,7 +137,7 @@ impl Wave {
         // Send packet
         self.socket.send_to(&message, remote.addr).await?;
         self.update_remote(&remote);
-        Ok(0)
+        Ok(data_len)
     }
 
     pub async fn receive(&mut self) -> Result<(SocketAddr, Vec<u8>)> {
