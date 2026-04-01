@@ -15,6 +15,7 @@ use std::net::SocketAddr;
 pub struct Wave {
     pub socket: UdpSocket,
     remote: Vec<Remote>,
+    queues: Vec<Queue>,
 }
 
 #[derive(Clone)]
@@ -22,6 +23,12 @@ struct Remote {
     addr: SocketAddr,
     crypto: Option<Crypto>,
     status: Status,
+}
+
+#[derive(Clone)]
+struct Queue {
+    addr: SocketAddr,
+    messages: Vec<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -36,24 +43,23 @@ impl Wave {
     const MAX_MSG: usize = 32768; // 32 * 1024
 
     pub async fn new() -> Result<Self> {
-        let socket = UdpSocket::bind("0.0.0.0:0").await?;
-        let remote = Vec::new();
-
-        Ok(Self { socket, remote })
+        Self::listen_at(0).await
     }
 
     pub async fn listen() -> Result<Self> {
-        let socket = UdpSocket::bind("0.0.0.0:9003").await?;
-        let remote = Vec::new();
-
-        Ok(Self { socket, remote })
+        Self::listen_at(9003).await
     }
 
     pub async fn listen_at(port: u16) -> Result<Self> {
         let socket = UdpSocket::bind(format!("0.0.0.0:{port}")).await?;
         let remote = Vec::new();
+        let queues = Vec::new();
 
-        Ok(Self { socket, remote })
+        Ok(Self {
+            socket,
+            remote,
+            queues,
+        })
     }
 
     pub fn debug_print_remotes(&self) {
@@ -62,27 +68,41 @@ impl Wave {
         }
     }
 
+    pub fn debug_queue_info(&self) {
+        for q in &self.queues {
+            println!("Queue Addr: {:?} Messages: {}", q.addr, q.messages.len());
+        }
+    }
+
     pub async fn connect(&mut self, remote: &str) -> Result<SocketAddr> {
         let addr: SocketAddr = remote.parse()?;
         self.socket.connect(addr).await?;
 
+        // Reset any crypto
         let mut remote = self.lookup_remote(&addr)?;
         remote.crypto = None;
         remote.status = Status::Ecdh;
         self.update_remote(&remote);
+
+        // Generate private and public keys
         let secret = Crypto::gen_secret();
         let public = Crypto::gen_pk_bytes(&secret);
 
+        // Send and receive public keys
         self.send(&remote.addr, public.as_bytes()).await?;
         let (_source, remote_public) = self.receive().await?;
+
+        // Calculate shared secret
         let ss = Crypto::gen_shared_secret(&remote_public, &secret)?;
         let crypto = Crypto::init(ss.raw_secret_bytes())?;
         remote.crypto = Some(crypto);
         self.update_remote(&remote);
 
-        // Set generated AES256 key
+        // Generate AES256 key and send it to the remote
         let key = Aes256Gcm::generate_key(OsRng);
         self.send(&remote.addr, key.as_slice()).await?;
+
+        // Set the new AES256 key as the current crypto
         let crypto = Crypto::init(&key)?;
         remote.crypto = Some(crypto);
         remote.status = Status::Encrypted;
@@ -92,14 +112,17 @@ impl Wave {
     }
 
     fn update_remote(&mut self, remote: &Remote) {
+        // Remove old Remote struct if it exists
         let index = self.remote.iter().position(|x| x.addr == remote.addr);
         if let Some(index) = index {
             self.remote.remove(index);
         }
+        // Push current Remote struct
         self.remote.push(remote.clone());
     }
 
     fn lookup_remote(&mut self, addr: &SocketAddr) -> Result<Remote> {
+        // Return Remote struct if it exists for the endpoint, else create a new Remote struct
         if let Some(remote) = self.remote.iter().position(|x| x.addr == *addr) {
             let remote = self.remote.remove(remote);
             Ok(remote)
@@ -110,6 +133,81 @@ impl Wave {
                 status: Status::Start,
             })
         }
+    }
+
+    fn lookup_queue(&mut self, addr: &SocketAddr) -> Option<Queue> {
+        // Return queue if it exists for the endpoint, else None
+        if let Some(index) = self.queues.iter().position(|x| x.addr == *addr) {
+            let queue = self.queues.remove(index);
+            Some(queue)
+        } else {
+            None
+        }
+    }
+
+    pub fn queue_clear(&mut self, addr: &SocketAddr) {
+        // Find and return queue if it exists, and do nothing with it which drops it
+        let _ = self.lookup_queue(addr);
+    }
+
+    pub async fn queue_send(&mut self, addr: &SocketAddr, data: &[u8]) -> Result<Vec<usize>> {
+        let mut res = Vec::new();
+        let mut err_queue = Vec::new();
+
+        // Check for previous queue
+        if let Some(mut queue) = self.lookup_queue(addr) {
+            let mut success = true;
+            // need to re-crypto if previous sends failed
+            match self.connect(&addr.to_string()).await {
+                Ok(_) => {}
+                Err(_) => {
+                    queue.messages.push(data.to_vec());
+                    self.queues.push(queue);
+                    return Ok(Vec::new());
+                }
+            }
+
+            // Iterate through the queue
+            for message in queue.messages {
+                // While succeeding...
+                if success {
+                    // Keep sending or else add all remaining messages to the queue
+                    match self.send(addr, &message).await {
+                        Ok(u) => res.push(u),
+                        Err(_e) => {
+                            success = false;
+                            err_queue.push(message);
+                        }
+                    }
+                } else {
+                    err_queue.push(message);
+                }
+            }
+            // If we failed to send all messages, re-add queue to self.queue
+            if !err_queue.is_empty() {
+                err_queue.push(data.to_vec());
+                queue.messages = err_queue;
+                self.queues.push(queue);
+                return Ok(res);
+            }
+        }
+
+        // Final send for current message, or append to queue
+        match self.send(addr, data).await {
+            Ok(u) => res.push(u),
+            Err(_e) => err_queue.push(data.to_vec()),
+        };
+
+        // Final push queue
+        if !err_queue.is_empty() {
+            let new_queue = Queue {
+                addr: *addr,
+                messages: err_queue,
+            };
+            self.queues.push(new_queue);
+        }
+
+        Ok(res)
     }
 
     pub async fn send(&mut self, addr: &SocketAddr, data: &[u8]) -> Result<usize> {
@@ -196,6 +294,11 @@ impl Wave {
     }
 
     fn package(sink: &mut impl Write, data: &[u8]) -> Result<()> {
+        // Package the Wave protocol
+        // ---
+        // 4 byte magic: b'wave'
+        // 4 byte length
+        // payload data[..length]
         let mut out: Vec<u8> = Self::WAVE.to_vec();
         let length: u32 = data.len().try_into()?;
         out.append(&mut length.to_be_bytes().to_vec());
@@ -206,6 +309,11 @@ impl Wave {
     }
 
     fn unpackage(source: &mut impl Read) -> Result<Vec<u8>> {
+        // Unpackage the Wave protocol
+        // ---
+        // 4 byte magic: b'wave'
+        // 4 byte length
+        // payload data[..length]
         let mut check = [0u8; 4];
         source.read_exact(&mut check)?;
         if check != Self::WAVE {
@@ -214,6 +322,12 @@ impl Wave {
 
         source.read_exact(&mut check)?;
         let length: u32 = u32::from_be_bytes(check);
+        if length as usize > Self::MAX_MSG {
+            return Err(anyhow!(
+                "Wave payload is too long ( {length} > {} )",
+                Self::MAX_MSG
+            ));
+        }
 
         let mut buf: Vec<u8> = vec![0; length.try_into()?];
         source.read_exact(&mut buf[..])?;
