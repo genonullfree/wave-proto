@@ -17,34 +17,35 @@ cargo add wave-proto
 ```
 
 Then in your project files, import the following as necessary:
-```bash
+```rust
 use wave-proto::Wave;
 ```
 
 The Wave object is used to handle all the networking and encryption. This
 object is instantiated in the following ways:
-```bash
+```rust
 let w = Wave::new();            // This binds to a local ephemeral port
 let w = Wave::listen();         // This binds to the Wave standard local port 9003
-let w = Wave::listen_on(####);  // This binds to a user-defined port ####
+let w = Wave::listen_on(0u16);  // This binds to a user-defined port
 ```
 
 Once instantiated, Wave can then "connect" to a remote network device
 ("connect" in quotes as this is over UDP). Encryption is established during
 this connection phase.
-```bash
+```rust
 // The connect function takes in an IP and port as a &str, and returns a
 // SocketAddr for the connection to the remote host.
 let remoteSA = w.connect("X.X.X.X:####").await?;
 ```
 
-This SocketAddr is used for some of the communication management. It is
+This SocketAddr is used for some of the communication management. The reason is
 currently due to how the Wave instance can handle encryption and communication
-with multiple remote hosts simultaneously, if desired.
+with multiple remote hosts simultaneously.
 
 The initial transparent connection traffic flow and key exchange is like this:
 ```
-client generates ECDH private + public values
+client generates ECDH private +
+    public values
 client sends public value to server ---> server receives public value and generates
                                             it's own private + public values
                                     <--- server calculates the shared secret and
@@ -67,7 +68,7 @@ as the encryption key
 
 Once the connection is established, sending and receiving messages is now
 relatively simple.
-```bash
+```rust
 let sent_bytes = w.send(&remoteSA, data.as_bytes()).await?;
 ...
 let (_remoteSA, message) = w.receive().await?;
@@ -77,7 +78,7 @@ let (_remoteSA, message) = w.receive().await?;
 
 Wave also has simple message queuing capabilities. Instead of using `.send()`,
 you need to use `.queue_send()`:
-```bash
+```rust
 let sent_bytes_vec = w.queue_send(&remoteSA, data.as_bytes()).await?;
 ```
 When this is used, Wave will check to see if the queue is empty or if it needs
