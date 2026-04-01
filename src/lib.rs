@@ -15,6 +15,7 @@ use std::net::SocketAddr;
 pub struct Wave {
     pub socket: UdpSocket,
     remote: Vec<Remote>,
+    queue: Vec<Queue>,
 }
 
 #[derive(Clone)]
@@ -22,6 +23,12 @@ struct Remote {
     addr: SocketAddr,
     crypto: Option<Crypto>,
     status: Status,
+}
+
+#[derive(Clone)]
+struct Queue {
+    addr: SocketAddr,
+    queue: Vec<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -36,29 +43,34 @@ impl Wave {
     const MAX_MSG: usize = 32768; // 32 * 1024
 
     pub async fn new() -> Result<Self> {
-        let socket = UdpSocket::bind("0.0.0.0:0").await?;
-        let remote = Vec::new();
-
-        Ok(Self { socket, remote })
+        Self::listen_at(0).await
     }
 
     pub async fn listen() -> Result<Self> {
-        let socket = UdpSocket::bind("0.0.0.0:9003").await?;
-        let remote = Vec::new();
-
-        Ok(Self { socket, remote })
+        Self::listen_at(9003).await
     }
 
     pub async fn listen_at(port: u16) -> Result<Self> {
         let socket = UdpSocket::bind(format!("0.0.0.0:{port}")).await?;
         let remote = Vec::new();
+        let queue = Vec::new();
 
-        Ok(Self { socket, remote })
+        Ok(Self {
+            socket,
+            remote,
+            queue,
+        })
     }
 
     pub fn debug_print_remotes(&self) {
         for r in &self.remote {
             println!("Connected Addr: {:?} Status: {:?}", r.addr, r.status);
+        }
+    }
+
+    pub fn debug_queue_info(&self) {
+        for q in &self.queue {
+            println!("Queue Addr: {:?} Messages: {}", q.addr, q.queue.len());
         }
     }
 
@@ -110,6 +122,82 @@ impl Wave {
                 status: Status::Start,
             })
         }
+    }
+
+    fn lookup_queue(&mut self, addr: &SocketAddr) -> Option<Queue> {
+        if let Some(queue) = self.queue.iter().position(|x| x.addr == *addr) {
+            let queue = self.queue.remove(queue);
+            Some(queue)
+        } else {
+            None
+        }
+    }
+
+    fn enqueue(&mut self, addr: &SocketAddr, message: Vec<u8>) {
+        let new_queue = if let Some(mut old_queue) = self.lookup_queue(addr) {
+            old_queue.queue.push(message);
+            old_queue
+        } else {
+            let new_queue = Queue {
+                addr: *addr,
+                queue: vec![message],
+            };
+            new_queue
+        };
+        self.queue.push(new_queue);
+    }
+
+    pub async fn queue_send(&mut self, addr: &SocketAddr, data: &[u8]) -> Result<Vec<usize>> {
+        let mut res = Vec::new();
+        let mut err_queue = Vec::new();
+
+        if let Some(mut queue) = self.lookup_queue(addr) {
+            let mut success = true;
+            // need to re-crypto if previous sends failed
+            match self.connect(&addr.to_string()).await {
+                Ok(_) => {}
+                Err(_) => {
+                    queue.queue.push(data.to_vec());
+                    self.queue.push(queue);
+                    return Ok(Vec::new());
+                }
+            }
+
+            for message in queue.queue {
+                if success {
+                    match self.send(addr, &message).await {
+                        Ok(u) => res.push(u),
+                        Err(_e) => {
+                            success = false;
+                            err_queue.push(message);
+                        }
+                    }
+                } else {
+                    err_queue.push(message);
+                }
+            }
+            if !err_queue.is_empty() {
+                err_queue.push(data.to_vec());
+                queue.queue = err_queue;
+                self.queue.push(queue);
+                return Ok(res);
+            }
+        }
+
+        match self.send(addr, data).await {
+            Ok(u) => res.push(u),
+            Err(_e) => err_queue.push(data.to_vec()),
+        };
+
+        if !err_queue.is_empty() {
+            let new_queue = Queue {
+                addr: *addr,
+                queue: err_queue,
+            };
+            self.queue.push(new_queue);
+        }
+
+        Ok(res)
     }
 
     pub async fn send(&mut self, addr: &SocketAddr, data: &[u8]) -> Result<usize> {
