@@ -145,6 +145,11 @@ impl Wave {
         }
     }
 
+    pub fn queue_clear(&mut self, addr: &SocketAddr) {
+        // Find and return queue if it exists, and do nothing with it which drops it
+        let _ = self.lookup_queue(addr);
+    }
+
     pub async fn queue_send(&mut self, addr: &SocketAddr, data: &[u8]) -> Result<Vec<usize>> {
         let mut res = Vec::new();
         let mut err_queue = Vec::new();

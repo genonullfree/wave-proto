@@ -1,11 +1,12 @@
 [package]
 name = "wave-proto"
-version = "0.0.2"
+version = "0.0.3"
 edition = "2024"
 authors = ["geno <nullfree.geno@gmail.com>"]
 license = "BSD-3-Clause"
 description = "Minimal UDP wrapper that transparently handles encryption and connection handling"
 repository = "https://github.com/genonullfree/wave-proto"
+readme = "README.md"
 
 [dependencies]
 aes-gcm = "0.10.3"
