@@ -78,23 +78,31 @@ impl Wave {
         let addr: SocketAddr = remote.parse()?;
         self.socket.connect(addr).await?;
 
+        // Reset any crypto
         let mut remote = self.lookup_remote(&addr)?;
         remote.crypto = None;
         remote.status = Status::Ecdh;
         self.update_remote(&remote);
+
+        // Generate private and public keys
         let secret = Crypto::gen_secret();
         let public = Crypto::gen_pk_bytes(&secret);
 
+        // Send and receive public keys
         self.send(&remote.addr, public.as_bytes()).await?;
         let (_source, remote_public) = self.receive().await?;
+
+        // Calculate shared secret
         let ss = Crypto::gen_shared_secret(&remote_public, &secret)?;
         let crypto = Crypto::init(ss.raw_secret_bytes())?;
         remote.crypto = Some(crypto);
         self.update_remote(&remote);
 
-        // Set generated AES256 key
+        // Generate AES256 key and send it to the remote
         let key = Aes256Gcm::generate_key(OsRng);
         self.send(&remote.addr, key.as_slice()).await?;
+
+        // Set the new AES256 key as the current crypto
         let crypto = Crypto::init(&key)?;
         remote.crypto = Some(crypto);
         remote.status = Status::Encrypted;
@@ -104,14 +112,17 @@ impl Wave {
     }
 
     fn update_remote(&mut self, remote: &Remote) {
+        // Remove old Remote struct if it exists
         let index = self.remote.iter().position(|x| x.addr == remote.addr);
         if let Some(index) = index {
             self.remote.remove(index);
         }
+        // Push current Remote struct
         self.remote.push(remote.clone());
     }
 
     fn lookup_remote(&mut self, addr: &SocketAddr) -> Result<Remote> {
+        // Return Remote struct if it exists for the endpoint, else create a new Remote struct
         if let Some(remote) = self.remote.iter().position(|x| x.addr == *addr) {
             let remote = self.remote.remove(remote);
             Ok(remote)
@@ -125,6 +136,7 @@ impl Wave {
     }
 
     fn lookup_queue(&mut self, addr: &SocketAddr) -> Option<Queue> {
+        // Return queue if it exists for the endpoint, else None
         if let Some(queue) = self.queue.iter().position(|x| x.addr == *addr) {
             let queue = self.queue.remove(queue);
             Some(queue)
@@ -133,24 +145,11 @@ impl Wave {
         }
     }
 
-    fn enqueue(&mut self, addr: &SocketAddr, message: Vec<u8>) {
-        let new_queue = if let Some(mut old_queue) = self.lookup_queue(addr) {
-            old_queue.queue.push(message);
-            old_queue
-        } else {
-            let new_queue = Queue {
-                addr: *addr,
-                queue: vec![message],
-            };
-            new_queue
-        };
-        self.queue.push(new_queue);
-    }
-
     pub async fn queue_send(&mut self, addr: &SocketAddr, data: &[u8]) -> Result<Vec<usize>> {
         let mut res = Vec::new();
         let mut err_queue = Vec::new();
 
+        // Check for previous queue
         if let Some(mut queue) = self.lookup_queue(addr) {
             let mut success = true;
             // need to re-crypto if previous sends failed
@@ -163,8 +162,11 @@ impl Wave {
                 }
             }
 
+            // Iterate through the queue
             for message in queue.queue {
+                // While succeeding...
                 if success {
+                    // Keep sending or else add all remaining messages to the queue
                     match self.send(addr, &message).await {
                         Ok(u) => res.push(u),
                         Err(_e) => {
@@ -176,6 +178,7 @@ impl Wave {
                     err_queue.push(message);
                 }
             }
+            // If we failed to send all messages, re-add queue to self.queue
             if !err_queue.is_empty() {
                 err_queue.push(data.to_vec());
                 queue.queue = err_queue;
@@ -184,11 +187,13 @@ impl Wave {
             }
         }
 
+        // Final send for current message, or append to queue
         match self.send(addr, data).await {
             Ok(u) => res.push(u),
             Err(_e) => err_queue.push(data.to_vec()),
         };
 
+        // Final push queue
         if !err_queue.is_empty() {
             let new_queue = Queue {
                 addr: *addr,
