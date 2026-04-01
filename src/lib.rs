@@ -15,7 +15,7 @@ use std::net::SocketAddr;
 pub struct Wave {
     pub socket: UdpSocket,
     remote: Vec<Remote>,
-    queue: Vec<Queue>,
+    queues: Vec<Queue>,
 }
 
 #[derive(Clone)]
@@ -28,7 +28,7 @@ struct Remote {
 #[derive(Clone)]
 struct Queue {
     addr: SocketAddr,
-    queue: Vec<Vec<u8>>,
+    messages: Vec<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -53,12 +53,12 @@ impl Wave {
     pub async fn listen_at(port: u16) -> Result<Self> {
         let socket = UdpSocket::bind(format!("0.0.0.0:{port}")).await?;
         let remote = Vec::new();
-        let queue = Vec::new();
+        let queues = Vec::new();
 
         Ok(Self {
             socket,
             remote,
-            queue,
+            queues,
         })
     }
 
@@ -69,8 +69,8 @@ impl Wave {
     }
 
     pub fn debug_queue_info(&self) {
-        for q in &self.queue {
-            println!("Queue Addr: {:?} Messages: {}", q.addr, q.queue.len());
+        for q in &self.queues {
+            println!("Queue Addr: {:?} Messages: {}", q.addr, q.messages.len());
         }
     }
 
@@ -137,8 +137,8 @@ impl Wave {
 
     fn lookup_queue(&mut self, addr: &SocketAddr) -> Option<Queue> {
         // Return queue if it exists for the endpoint, else None
-        if let Some(queue) = self.queue.iter().position(|x| x.addr == *addr) {
-            let queue = self.queue.remove(queue);
+        if let Some(index) = self.queues.iter().position(|x| x.addr == *addr) {
+            let queue = self.queues.remove(index);
             Some(queue)
         } else {
             None
@@ -156,14 +156,14 @@ impl Wave {
             match self.connect(&addr.to_string()).await {
                 Ok(_) => {}
                 Err(_) => {
-                    queue.queue.push(data.to_vec());
-                    self.queue.push(queue);
+                    queue.messages.push(data.to_vec());
+                    self.queues.push(queue);
                     return Ok(Vec::new());
                 }
             }
 
             // Iterate through the queue
-            for message in queue.queue {
+            for message in queue.messages {
                 // While succeeding...
                 if success {
                     // Keep sending or else add all remaining messages to the queue
@@ -181,8 +181,8 @@ impl Wave {
             // If we failed to send all messages, re-add queue to self.queue
             if !err_queue.is_empty() {
                 err_queue.push(data.to_vec());
-                queue.queue = err_queue;
-                self.queue.push(queue);
+                queue.messages = err_queue;
+                self.queues.push(queue);
                 return Ok(res);
             }
         }
@@ -197,9 +197,9 @@ impl Wave {
         if !err_queue.is_empty() {
             let new_queue = Queue {
                 addr: *addr,
-                queue: err_queue,
+                messages: err_queue,
             };
-            self.queue.push(new_queue);
+            self.queues.push(new_queue);
         }
 
         Ok(res)
@@ -289,6 +289,11 @@ impl Wave {
     }
 
     fn package(sink: &mut impl Write, data: &[u8]) -> Result<()> {
+        // Package the Wave protocol
+        // ---
+        // 4 byte magic: b'wave'
+        // 4 byte length
+        // payload data[..length]
         let mut out: Vec<u8> = Self::WAVE.to_vec();
         let length: u32 = data.len().try_into()?;
         out.append(&mut length.to_be_bytes().to_vec());
@@ -299,6 +304,11 @@ impl Wave {
     }
 
     fn unpackage(source: &mut impl Read) -> Result<Vec<u8>> {
+        // Unpackage the Wave protocol
+        // ---
+        // 4 byte magic: b'wave'
+        // 4 byte length
+        // payload data[..length]
         let mut check = [0u8; 4];
         source.read_exact(&mut check)?;
         if check != Self::WAVE {
@@ -307,6 +317,12 @@ impl Wave {
 
         source.read_exact(&mut check)?;
         let length: u32 = u32::from_be_bytes(check);
+        if length as usize > Self::MAX_MSG {
+            return Err(anyhow!(
+                "Wave payload is too long ( {length} > {} )",
+                Self::MAX_MSG
+            ));
+        }
 
         let mut buf: Vec<u8> = vec![0; length.try_into()?];
         source.read_exact(&mut buf[..])?;
