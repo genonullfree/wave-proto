@@ -13,7 +13,7 @@ use std::net::SocketAddr;
 
 #[derive(Clone)]
 pub struct Wave {
-    pub socket: UdpSocket,
+    socket: UdpSocket,
     remote: Vec<Remote>,
     queues: Vec<Queue>,
 }
