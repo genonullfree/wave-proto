@@ -40,7 +40,8 @@ enum Status {
 
 impl Wave {
     const WAVE: &[u8] = &[0x77, 0x61, 0x76, 0x65];
-    const MAX_MSG: usize = 32768; // 32 * 1024
+    const MAX_DATA: usize = 32768; // 32 * 1024
+    const MAX_MSG: usize = Self::MAX_DATA + 8;
 
     pub async fn new() -> Result<Self> {
         Self::listen_at(0).await
@@ -215,10 +216,10 @@ impl Wave {
         // Package message
         let mut buf = Vec::new();
         let data_len = data.len();
-        if data_len > Self::MAX_MSG {
+        if data_len > Self::MAX_DATA {
             return Err(anyhow!(
                 "Message is too long ( {data_len} > {} )",
-                Self::MAX_MSG
+                Self::MAX_DATA
             ));
         }
 
@@ -247,7 +248,7 @@ impl Wave {
 
     pub async fn receive(&mut self) -> Result<(SocketAddr, Vec<u8>)> {
         // Receive packet
-        let mut buf = [0u8; Self::MAX_MSG + 8];
+        let mut buf = [0u8; Self::MAX_MSG];
         let (length, source) = self.socket.recv_from(&mut buf).await?;
 
         let mut remote = self.lookup_remote(&source)?;
@@ -322,10 +323,10 @@ impl Wave {
 
         source.read_exact(&mut check)?;
         let length: u32 = u32::from_be_bytes(check);
-        if length as usize > Self::MAX_MSG {
+        if length as usize > Self::MAX_DATA {
             return Err(anyhow!(
                 "Wave payload is too long ( {length} > {} )",
-                Self::MAX_MSG
+                Self::MAX_DATA
             ));
         }
 
